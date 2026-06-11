@@ -8,15 +8,10 @@ import {
   onMount,
 } from "solid-js";
 import { css } from "../styled-system/css";
+import { Item, parseItems } from "./loader";
+import { renderMarkdown } from "./markdown";
 import { ApiSource, ORDER_LABELS, Order } from "./store";
 import * as ui from "./ui";
-
-type Item = {
-  id: number;
-  title: string;
-  contents: string;
-  date?: string;
-};
 
 // ── このコンポーネント専用のスタイル(同一ファイル内に定義)──────
 
@@ -81,14 +76,65 @@ const word = css({
   overflowWrap: "anywhere",
 });
 
+// めくった後の答え(赤ペン)。中身は GFM マークダウンを HTML 化して描画する
 const answer = css({
   flex: "1",
   paddingTop: "4",
   fontSize: "17px",
   lineHeight: "1.9",
   color: "shu", // 答えは赤ペンで
-  whiteSpace: "pre-wrap",
   overflowWrap: "anywhere",
+  // ── マークダウン HTML のスタイル ──
+  "& > :first-child": { marginTop: "0" },
+  "& > :last-child": { marginBottom: "0" },
+  "& p": { margin: "0 0 0.6em" },
+  "& ul, & ol": { margin: "0 0 0.6em", paddingLeft: "1.4em" },
+  "& li": { marginBottom: "0.2em" },
+  "& li > input[type=checkbox]": { marginRight: "0.4em" },
+  "& h1, & h2, & h3, & h4, & h5, & h6": {
+    margin: "0.4em 0 0.3em",
+    lineHeight: "1.3",
+    fontWeight: "bold",
+  },
+  "& code": {
+    fontFamily: "monospace",
+    fontSize: "0.88em",
+    background: "rgba(0,0,0,0.06)",
+    padding: "0.1em 0.35em",
+    borderRadius: "4px",
+  },
+  "& pre": {
+    background: "rgba(0,0,0,0.06)",
+    padding: "10px 12px",
+    borderRadius: "8px",
+    overflowX: "auto",
+    margin: "0 0 0.6em",
+  },
+  "& pre code": { background: "none", padding: "0", fontSize: "0.85em" },
+  "& a": { color: "shu", textDecoration: "underline" },
+  "& blockquote": {
+    margin: "0 0 0.6em",
+    paddingLeft: "0.8em",
+    borderLeft: "3px solid token(colors.line)",
+    color: "sub",
+  },
+  "& table": {
+    borderCollapse: "collapse",
+    margin: "0 0 0.6em",
+    fontSize: "0.9em",
+  },
+  "& th, & td": {
+    border: "1px solid token(colors.line)",
+    padding: "4px 8px",
+    textAlign: "left",
+  },
+  "& hr": {
+    border: "none",
+    borderTop: "1px solid token(colors.line)",
+    margin: "0.6em 0",
+  },
+  "& img": { maxWidth: "100%" },
+  "& del": { color: "sub" },
 });
 
 const centerNote = css({
@@ -210,9 +256,10 @@ export default function Deck(props: {
     try {
       const res = await fetch(src.url);
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      const data: unknown = await res.json();
-      if (!Array.isArray(data)) throw new Error("配列ではありません");
-      setItems(sortItems(data as Item[], src.order));
+      const text = await res.text();
+      // JSON / CSV を自動判定して Item 配列へ正規化する
+      const data = parseItems(text, res.headers.get("content-type"), src.url);
+      setItems(sortItems(data, src.order));
     } catch (e) {
       setLoadError(e instanceof Error ? e.message : String(e));
     }
@@ -339,7 +386,7 @@ export default function Deck(props: {
                   fallback={<p class={front}>{item()!.title}</p>}
                 >
                   <h2 class={word}>{item()!.title}</h2>
-                  <div class={answer}>{item()!.contents}</div>
+                  <div class={answer} innerHTML={renderMarkdown(item()!.contents)} />
                 </Show>
               </Show>
             </Show>

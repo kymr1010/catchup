@@ -10,6 +10,8 @@
     "preview": "vite preview"
   },
   "dependencies": {
+    "dompurify": "^3.4.9",
+    "marked": "^18.0.5",
     "solid-js": "^1.9.5"
   },
   "devDependencies": {
