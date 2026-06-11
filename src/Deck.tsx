@@ -24,6 +24,9 @@ const card = css({
     "0 1px 2px rgba(31,41,51,0.10), 0 14px 30px -18px rgba(31,41,51,0.40)",
   padding: "52px 26px 26px",
   minHeight: "340px",
+  // 画面幅を超えないようにする(狭い端末でのはみ出し防止)
+  maxWidth: "100%",
+  minWidth: "0",
   display: "flex",
   flexDirection: "column",
   _before: {
@@ -53,6 +56,7 @@ const counter = css({
 // 表面: 単語のみを中央に
 const front = css({
   flex: "1",
+  minWidth: "0",
   display: "flex",
   alignItems: "center",
   justifyContent: "center",
@@ -68,6 +72,7 @@ const front = css({
 // めくった後: 上部に単語、薄青の罫線、その下に赤ペンの答え
 const word = css({
   margin: "0",
+  minWidth: "0",
   paddingBottom: "14px",
   fontSize: "21px",
   fontWeight: "bold",
@@ -79,6 +84,7 @@ const word = css({
 // めくった後の答え(赤ペン)。中身は GFM マークダウンを HTML 化して描画する
 const answer = css({
   flex: "1",
+  minWidth: "0", // flex 子の min-width:auto による横はみ出しを防ぐ
   paddingTop: "4",
   fontSize: "17px",
   lineHeight: "1.9",
@@ -119,6 +125,10 @@ const answer = css({
     color: "sub",
   },
   "& table": {
+    // 列が多い表は折り返さず横スクロールさせ、カード幅を超えさせない
+    display: "block",
+    overflowX: "auto",
+    maxWidth: "100%",
     borderCollapse: "collapse",
     margin: "0 0 0.6em",
     fontSize: "0.9em",

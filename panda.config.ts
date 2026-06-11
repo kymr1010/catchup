@@ -36,6 +36,11 @@ export default defineConfig({
 
   // グローバルスタイルは body の地色と書体のみに留める
   globalCss: {
+    "html, body": {
+      // 狭い端末での意図しない横スクロール(はみ出し)を防ぐ安全網
+      maxWidth: "100%",
+      overflowX: "hidden",
+    },
     body: {
       background: "desk",
       color: "ink",
