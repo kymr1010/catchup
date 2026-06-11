@@ -289,7 +289,11 @@ export default function Deck(props: {
       if (isOk) setOkCount((n) => n + 1);
       fetch(props.source.url, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        // application/json は CORS プリフライト(OPTIONS)を誘発し、GAS は
+        // これを処理できず弾かれる。text/plain なら「単純リクエスト」となり
+        // プリフライトが発生しない。ボディは JSON 文字列のままで、GAS 側は
+        // e.postData.contents で受け取って JSON.parse できる。
+        headers: { "Content-Type": "text/plain;charset=utf-8" },
         body: JSON.stringify({
           id: it.id,
           is_OK: isOk,
