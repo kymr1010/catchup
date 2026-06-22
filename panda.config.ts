@@ -40,6 +40,9 @@ export default defineConfig({
       // 狭い端末での意図しない横スクロール(はみ出し)を防ぐ安全網
       maxWidth: "100%",
       overflowX: "hidden",
+      // スマホでの素早い連打時にダブルタップ判定でズームインするのを防ぐ
+      // (通常のスクロール・ピンチズームは維持される)
+      touchAction: "manipulation",
     },
     body: {
       background: "desk",

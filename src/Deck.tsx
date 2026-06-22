@@ -321,7 +321,7 @@ export default function Deck(props: {
     setIdx((n) => n + 1);
   };
 
-  // キーボード操作: Space = Reveal / OK 切替, Enter = Skip
+  // キーボード操作: Space = Reveal / OK 切替, Enter = Next
   onMount(() => {
     const onKey = (e: KeyboardEvent) => {
       const t = e.target as HTMLElement | null;
@@ -444,7 +444,7 @@ export default function Deck(props: {
                   Reveal
                 </button>
                 <button class={ui.button({ kind: "ghost" })} onClick={skip}>
-                  Skip
+                  Next
                 </button>
               </div>
             }
@@ -458,11 +458,11 @@ export default function Deck(props: {
                 {ok() ? "◯ OK" : "OK"}
               </button>
               <button class={ui.button({ kind: "ghost" })} onClick={skip}>
-                Skip
+                Next
               </button>
             </div>
           </Show>
-          <p class={hint}>Space: Reveal / OK 切替　Enter: Skip</p>
+          <p class={hint}>Space: Reveal / OK 切替　Enter: Next</p>
         </Show>
       </Show>
 
