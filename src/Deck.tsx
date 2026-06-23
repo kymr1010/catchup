@@ -211,6 +211,72 @@ const topActions = css({
 
 // ── ロジック ────────────────────────────────────
 
+// 「暗記」順のパラメータ
+const THREE_MIN_MS = 3 * 60 * 1000;
+// 正答 1 回ごとに優先度を下げる重み。経過時間(分)の自然対数スケールに対して
+// 加算するため、1 回正答するごとに「e^5 ≒ 148 倍ほど昔に学習した」のと同等の
+// 扱いになり、出る頻度が大きく下がる。
+const OK_COUNT_PENALTY = 5;
+
+// Fisher–Yates シャッフル(破壊的)
+function shuffle<T>(a: T[]): T[] {
+  for (let i = a.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [a[i], a[j]] = [a[j], a[i]];
+  }
+  return a;
+}
+
+// base 配列のランダムな位置に extras を 1 つずつ挿入して散りばめる
+function interleaveRandom(base: Item[], extras: Item[]): Item[] {
+  const result = [...base];
+  for (const e of shuffle([...extras])) {
+    const pos = Math.floor(Math.random() * (result.length + 1));
+    result.splice(pos, 0, e);
+  }
+  return result;
+}
+
+// 「暗記」順: エビングハウスの忘却曲線に沿って復習効果の高いものを前に出す。
+//  - 直近に学習した(更新日時が新しい=経過時間が短い)ものほど優先(復習が最重要)
+//  - 正答数が多いものほど優先度を下げ、出る頻度を落とす(間隔とは独立した重み)
+//  - 学習から 3 分以内のものは連続表示を避けるため今回の並びから除外
+//  - 正答数 0 かつ更新日時なし(未学習)のものは、重みを無視してランダムに混ぜ込む
+//    (重み付けに従うと永遠に出なくなってしまうため)
+function memorizeOrder(data: Item[]): Item[] {
+  const now = Date.now();
+  const fresh: Item[] = []; // 未学習(正答数0かつ日時なし)→ ランダム混入
+  const scored: { item: Item; priority: number }[] = [];
+
+  for (const it of data) {
+    const t = it.date ? Date.parse(it.date) : NaN;
+    const hasDate = !Number.isNaN(t);
+    const ok = it.okCount ?? 0;
+
+    if (!hasDate) {
+      // 日時なし: 未学習(正答数0)はランダム混入、それ以外は最後尾の低優先へ
+      if (ok === 0) fresh.push(it);
+      else scored.push({ item: it, priority: -Number.MAX_VALUE });
+      continue;
+    }
+
+    const elapsed = now - t;
+    // 学習直後 3 分間は同じものの連続表示を避けるため除外する
+    if (elapsed < THREE_MIN_MS) continue;
+
+    const elapsedMin = elapsed / 60000;
+    // 経過時間が短い(=直近に学習した)ほど優先度を高く、正答数が多いほど下げる
+    const priority = -Math.log(elapsedMin) - OK_COUNT_PENALTY * ok;
+    scored.push({ item: it, priority });
+  }
+
+  scored.sort((x, y) => y.priority - x.priority);
+  return interleaveRandom(
+    scored.map((s) => s.item),
+    fresh,
+  );
+}
+
 function sortItems(data: Item[], order: Order): Item[] {
   const a = [...data];
   if (order === "id_asc") {
@@ -227,12 +293,11 @@ function sortItems(data: Item[], order: Order): Item[] {
     };
     return a.sort((x, y) => key(y) - key(x));
   }
-  // random(デフォルト): Fisher–Yates シャッフル
-  for (let i = a.length - 1; i > 0; i--) {
-    const j = Math.floor(Math.random() * (i + 1));
-    [a[i], a[j]] = [a[j], a[i]];
+  if (order === "memorize") {
+    return memorizeOrder(a);
   }
-  return a;
+  // random(デフォルト): Fisher–Yates シャッフル
+  return shuffle(a);
 }
 
 export default function Deck(props: {

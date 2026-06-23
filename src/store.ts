@@ -1,6 +1,6 @@
 // 取得先 API の保存・読込(localStorage)
 
-export type Order = "random" | "id_asc" | "date_desc";
+export type Order = "random" | "id_asc" | "date_desc" | "memorize";
 
 export type ApiSource = {
   id: string; // [API_id] — URL パラメータ ?id= に対応
@@ -13,6 +13,7 @@ export const ORDER_LABELS: Record<Order, string> = {
   random: "ランダム",
   id_asc: "id 昇順",
   date_desc: "日付降順",
+  memorize: "暗記",
 };
 
 const KEY = "tango-cards.sources.v1";
@@ -29,7 +30,9 @@ export function loadSources(): ApiSource[] {
         id: s.id,
         name: typeof s.name === "string" ? s.name : s.id,
         url: s.url,
-        order: (["random", "id_asc", "date_desc"] as const).includes(s.order)
+        order: (
+          ["random", "id_asc", "date_desc", "memorize"] as const
+        ).includes(s.order)
           ? s.order
           : "random",
       }));

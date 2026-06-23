@@ -6,7 +6,23 @@ export type Item = {
   title: string;
   contents: string;
   date?: string;
+  okCount?: number; // 正答数(「暗記」順での重み付けに使用)
 };
+
+// 正答数の列名ゆれを吸収する(小文字で比較)
+const OK_COUNT_KEYS = [
+  "ok_count",
+  "okcount",
+  "correct_count",
+  "correct",
+  "count",
+];
+
+// 任意の値を 0 以上の整数の正答数に正規化する(不正なら 0)
+function toOkCount(raw: unknown): number {
+  const n = Number(raw);
+  return Number.isFinite(n) && n > 0 ? Math.floor(n) : 0;
+}
 
 type Format = "json" | "csv";
 
@@ -99,6 +115,7 @@ function csvToItems(text: string): Item[] {
   const titleIdx = header.indexOf("title");
   const contentsIdx = header.indexOf("contents");
   const dateIdx = header.indexOf("date");
+  const okCountIdx = header.findIndex((h) => OK_COUNT_KEYS.includes(h));
 
   if (titleIdx === -1 || contentsIdx === -1) {
     throw new Error("CSV に title / contents 列がありません");
@@ -119,6 +136,7 @@ function csvToItems(text: string): Item[] {
     };
     const d = dateIdx >= 0 ? (cells[dateIdx] ?? "").trim() : "";
     if (d) item.date = d;
+    if (okCountIdx >= 0) item.okCount = toOkCount((cells[okCountIdx] ?? "").trim());
     items.push(item);
   }
   return items;
@@ -127,7 +145,14 @@ function csvToItems(text: string): Item[] {
 function jsonToItems(text: string): Item[] {
   const data: unknown = JSON.parse(text);
   if (!Array.isArray(data)) throw new Error("配列ではありません");
-  return data as Item[];
+  return data.map((raw) => {
+    const r = (raw ?? {}) as Record<string, unknown>;
+    const item = raw as Item;
+    // 正答数は列名ゆれを吸収しつつ正規化する(date など他フィールドは元のまま)
+    const okKey = Object.keys(r).find((k) => OK_COUNT_KEYS.includes(k.toLowerCase()));
+    if (okKey !== undefined) item.okCount = toOkCount(r[okKey]);
+    return item;
+  });
 }
 
 // 取得したテキストを形式に応じて Item 配列へ変換する
