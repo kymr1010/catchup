@@ -227,41 +227,44 @@ function shuffle<T>(a: T[]): T[] {
   return a;
 }
 
-// base 配列のランダムな位置に extras を 1 つずつ挿入して散りばめる
-function interleaveRandom(base: Item[], extras: Item[]): Item[] {
-  const result = [...base];
-  for (const e of shuffle([...extras])) {
-    const pos = Math.floor(Math.random() * (result.length + 1));
-    result.splice(pos, 0, e);
-  }
-  return result;
-}
-
-// 「暗記」順: エビングハウスの忘却曲線に沿って復習効果の高いものを前に出す。
-//  - 直近に学習した(更新日時が新しい=経過時間が短い)ものほど優先(復習が最重要)
+// 「暗記」順: エビングハウスの忘却曲線に沿って、いま復習効果が最も高い 1 枚を
+// 動的に選ぶ。読み込み時に並びを固定するのではなく、表示のたびに現在時刻で
+// 選び直すことで、同一セッション中でも「3 分前に学習したもの」を再び出題できる。
+//  - 直近に学習した(経過時間が短い)ものほど優先(復習が最重要)
 //  - 正答数が多いものほど優先度を下げ、出る頻度を落とす(間隔とは独立した重み)
-//  - 学習から 3 分以内のものは連続表示を避けるため今回の並びから除外
-//  - 正答数 0 かつ更新日時なし(未学習)のものは、重みを無視してランダムに混ぜ込む
+//  - 最後に表示してから 3 分以内のものは連続表示を避けるため対象外
+//  - 正答数 0 かつ一度も学習されていないものは、重みを無視してランダムに混ぜ込む
 //    (重み付けに従うと永遠に出なくなってしまうため)
-function memorizeOrder(data: Item[]): Item[] {
-  const now = Date.now();
+//
+// effTime: そのカードを「最後に学習した時刻(ms)」。未学習なら NaN。
+//          バックエンドの date とセッション中の表示時刻の新しい方を渡す。
+// effOk:   正答数(バックエンドの値 + セッション中の OK 回数)。
+// excludeId: 直前に表示したカード(連続表示を避けるため除外)。
+// 対象が無ければ null を返す(全カードが 3 分以内 → 呼び出し側で待機表示)。
+function pickMemorizeCandidate(
+  items: Item[],
+  now: number,
+  effTime: (it: Item) => number,
+  effOk: (it: Item) => number,
+  excludeId: number | null,
+): Item | null {
   const fresh: Item[] = []; // 未学習(正答数0かつ日時なし)→ ランダム混入
   const scored: { item: Item; priority: number }[] = [];
 
-  for (const it of data) {
-    const t = it.date ? Date.parse(it.date) : NaN;
-    const hasDate = !Number.isNaN(t);
-    const ok = it.okCount ?? 0;
+  for (const it of items) {
+    if (excludeId !== null && it.id === excludeId) continue;
+    const t = effTime(it);
+    const ok = effOk(it);
 
-    if (!hasDate) {
-      // 日時なし: 未学習(正答数0)はランダム混入、それ以外は最後尾の低優先へ
+    if (Number.isNaN(t)) {
+      // 一度も学習されていない: 正答数0はランダム混入、それ以外は低優先
       if (ok === 0) fresh.push(it);
       else scored.push({ item: it, priority: -Number.MAX_VALUE });
       continue;
     }
 
     const elapsed = now - t;
-    // 学習直後 3 分間は同じものの連続表示を避けるため除外する
+    // 最後の表示から 3 分以内は連続表示を避けるため対象外
     if (elapsed < THREE_MIN_MS) continue;
 
     const elapsedMin = elapsed / 60000;
@@ -270,11 +273,17 @@ function memorizeOrder(data: Item[]): Item[] {
     scored.push({ item: it, priority });
   }
 
+  const pool = fresh.length + scored.length;
+  if (pool === 0) return null;
+  // fresh は重み無視でランダムに混ぜ込む。1 枚選ぶ際は出現確率として表現する
+  if (
+    fresh.length > 0 &&
+    (scored.length === 0 || Math.random() < fresh.length / pool)
+  ) {
+    return fresh[Math.floor(Math.random() * fresh.length)];
+  }
   scored.sort((x, y) => y.priority - x.priority);
-  return interleaveRandom(
-    scored.map((s) => s.item),
-    fresh,
-  );
+  return scored[0].item;
 }
 
 function sortItems(data: Item[], order: Order): Item[] {
@@ -293,8 +302,9 @@ function sortItems(data: Item[], order: Order): Item[] {
     };
     return a.sort((x, y) => key(y) - key(x));
   }
+  // memorize は表示のたびに動的に選ぶため、ここでは並べ替えず全件をプールとして返す
   if (order === "memorize") {
-    return memorizeOrder(a);
+    return a;
   }
   // random(デフォルト): Fisher–Yates シャッフル
   return shuffle(a);
@@ -313,6 +323,42 @@ export default function Deck(props: {
   const [okCount, setOkCount] = createSignal(0);
   const [toastMsg, setToastMsg] = createSignal("");
 
+  const isMemorize = () => props.source.order === "memorize";
+
+  // ── 「暗記」モードのセッション状態 ──────────────────
+  // idx で固定列を進むのではなく、表示のたびに動的に 1 枚を選ぶ。
+  const [currentId, setCurrentId] = createSignal<number | null>(null); // 表示中の id
+  const [lastShownId, setLastShownId] = createSignal<number | null>(null); // 連続表示除外用
+  const [reviewCount, setReviewCount] = createSignal(0); // セッション中の復習回数
+  // カードごとの「セッション中に最後に表示した時刻(ms)」と「OK 回数」
+  const [seenAt, setSeenAt] = createSignal<Map<number, number>>(new Map());
+  const [okDelta, setOkDelta] = createSignal<Map<number, number>>(new Map());
+
+  // そのカードを最後に学習した時刻(バックエンド date とセッション表示時刻の新しい方)
+  const effTime = (it: Item) => {
+    const seen = seenAt().get(it.id);
+    const base = it.date ? Date.parse(it.date) : NaN;
+    const baseValid = !Number.isNaN(base);
+    if (seen !== undefined && baseValid) return Math.max(seen, base);
+    if (seen !== undefined) return seen;
+    return baseValid ? base : NaN;
+  };
+  const effOk = (it: Item) => (it.okCount ?? 0) + (okDelta().get(it.id) ?? 0);
+
+  // いま出すべき 1 枚を選ぶ。まず直前カードを除外して選び、対象が無ければ
+  // 除外なしで再選択(3 分経過後にその 1 枚しか残っていない場合の手詰まり回避)。
+  const pickNext = (excludeId: number | null): Item | null => {
+    const list = items();
+    if (!list || list.length === 0) return null;
+    const now = Date.now();
+    return (
+      pickMemorizeCandidate(list, now, effTime, effOk, excludeId) ??
+      (excludeId === null
+        ? null
+        : pickMemorizeCandidate(list, now, effTime, effOk, null))
+    );
+  };
+
   let toastTimer: ReturnType<typeof setTimeout> | undefined;
   const showToast = (msg: string) => {
     setToastMsg(msg);
@@ -328,6 +374,11 @@ export default function Deck(props: {
     setRevealed(false);
     setOk(false);
     setOkCount(0);
+    setCurrentId(null);
+    setLastShownId(null);
+    setReviewCount(0);
+    setSeenAt(new Map());
+    setOkDelta(new Map());
     try {
       const res = await fetch(src.url);
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
@@ -335,6 +386,8 @@ export default function Deck(props: {
       // JSON / CSV を自動判定して Item 配列へ正規化する
       const data = parseItems(text, res.headers.get("content-type"), src.url);
       setItems(sortItems(data, src.order));
+      // 暗記モードは最初の 1 枚を動的に選ぶ
+      if (src.order === "memorize") setCurrentId(pickNext(null)?.id ?? null);
     } catch (e) {
       setLoadError(e instanceof Error ? e.message : String(e));
     }
@@ -348,9 +401,27 @@ export default function Deck(props: {
   const total = () => items()?.length ?? 0;
   const item = createMemo<Item | null>(() => {
     const list = items();
-    return list && idx() < list.length ? list[idx()] : null;
+    if (!list) return null;
+    if (isMemorize()) {
+      const id = currentId();
+      return id === null ? null : (list.find((i) => i.id === id) ?? null);
+    }
+    return idx() < list.length ? list[idx()] : null;
   });
-  const finished = () => items() !== null && idx() >= total();
+  // 暗記モードはループのため終了しない(ユーザーが「API 一覧」で抜ける)
+  const finished = () =>
+    !isMemorize() && items() !== null && idx() >= total();
+
+  // 暗記モードで出せるカードが無い(全て 3 分以内)とき、時間経過で自動再開する
+  onMount(() => {
+    const timer = setInterval(() => {
+      if (!isMemorize() || loadError() || !items()) return;
+      if (currentId() !== null) return; // 表示中なら何もしない
+      const next = pickNext(lastShownId());
+      if (next) setCurrentId(next.id);
+    }, 5000);
+    onCleanup(() => clearInterval(timer));
+  });
 
   const reveal = () => setRevealed(true);
   const toggleOk = () => setOk((v) => !v);
@@ -362,6 +433,14 @@ export default function Deck(props: {
     if (revealed()) {
       const isOk = ok();
       if (isOk) setOkCount((n) => n + 1);
+      // 暗記モードでは正答をセッション内にも反映し、出る頻度を下げる
+      if (isOk && isMemorize()) {
+        setOkDelta((m) => {
+          const next = new Map(m);
+          next.set(it.id, (next.get(it.id) ?? 0) + 1);
+          return next;
+        });
+      }
       fetch(props.source.url, {
         method: "POST",
         // application/json は CORS プリフライト(OPTIONS)を誘発し、GAS は
@@ -383,6 +462,19 @@ export default function Deck(props: {
     }
     setRevealed(false);
     setOk(false);
+
+    if (isMemorize()) {
+      // 表示時刻を記録(3 分間は再表示しない)し、次の 1 枚を動的に選ぶ
+      setSeenAt((m) => {
+        const next = new Map(m);
+        next.set(it.id, Date.now());
+        return next;
+      });
+      setLastShownId(it.id);
+      setReviewCount((n) => n + 1);
+      setCurrentId(pickNext(it.id)?.id ?? null); // null なら待機表示
+      return;
+    }
     setIdx((n) => n + 1);
   };
 
@@ -428,7 +520,9 @@ export default function Deck(props: {
       <section class={card}>
         <Show when={!finished() && !loadError() && items()}>
           <span class={counter}>
-            {Math.min(idx() + 1, total())} / {total()}
+            {isMemorize()
+              ? `復習 ${reviewCount()} 回`
+              : `${Math.min(idx() + 1, total())} / ${total()}`}
           </span>
         </Show>
 
@@ -461,11 +555,25 @@ export default function Deck(props: {
                 }
               >
                 <Show
-                  when={revealed()}
-                  fallback={<p class={front}>{item()!.title}</p>}
+                  when={item()}
+                  fallback={
+                    <p class={centerNote}>
+                      直近 3 分以内に学習したカードばかりです。
+                      <br />
+                      少し待つと再開します。
+                    </p>
+                  }
                 >
-                  <h2 class={word}>{item()!.title}</h2>
-                  <div class={answer} innerHTML={renderMarkdown(item()!.contents)} />
+                  <Show
+                    when={revealed()}
+                    fallback={<p class={front}>{item()!.title}</p>}
+                  >
+                    <h2 class={word}>{item()!.title}</h2>
+                    <div
+                      class={answer}
+                      innerHTML={renderMarkdown(item()!.contents)}
+                    />
+                  </Show>
                 </Show>
               </Show>
             </Show>
@@ -501,33 +609,35 @@ export default function Deck(props: {
             </div>
           }
         >
-          <Show
-            when={revealed()}
-            fallback={
+          <Show when={item()}>
+            <Show
+              when={revealed()}
+              fallback={
+                <div class={ui.buttonRow}>
+                  <button class={ui.button({ kind: "primary" })} onClick={reveal}>
+                    Reveal
+                  </button>
+                  <button class={ui.button({ kind: "ghost" })} onClick={skip}>
+                    Next
+                  </button>
+                </div>
+              }
+            >
               <div class={ui.buttonRow}>
-                <button class={ui.button({ kind: "primary" })} onClick={reveal}>
-                  Reveal
+                <button
+                  class={ui.button({ kind: "ok", active: ok() })}
+                  aria-pressed={ok()}
+                  onClick={toggleOk}
+                >
+                  {ok() ? "◯ OK" : "OK"}
                 </button>
                 <button class={ui.button({ kind: "ghost" })} onClick={skip}>
                   Next
                 </button>
               </div>
-            }
-          >
-            <div class={ui.buttonRow}>
-              <button
-                class={ui.button({ kind: "ok", active: ok() })}
-                aria-pressed={ok()}
-                onClick={toggleOk}
-              >
-                {ok() ? "◯ OK" : "OK"}
-              </button>
-              <button class={ui.button({ kind: "ghost" })} onClick={skip}>
-                Next
-              </button>
-            </div>
+            </Show>
+            <p class={hint}>Space: Reveal / OK 切替　Enter: Next</p>
           </Show>
-          <p class={hint}>Space: Reveal / OK 切替　Enter: Next</p>
         </Show>
       </Show>
 
