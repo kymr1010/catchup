@@ -520,9 +520,7 @@ export default function Deck(props: {
       <section class={card}>
         <Show when={!finished() && !loadError() && items()}>
           <span class={counter}>
-            {isMemorize()
-              ? `復習 ${reviewCount()} 回`
-              : `${Math.min(idx() + 1, total())} / ${total()}`}
+            {isMemorize() ? reviewCount() + 1 : Math.min(idx() + 1, total())}
           </span>
         </Show>
 
