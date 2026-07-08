@@ -133,8 +133,10 @@ export default function Manager(props: {
 }) {
   const [name, setName] = createSignal("");
   const [url, setUrl] = createSignal("");
+  const [authorizationToken, setAuthorizationToken] = createSignal("");
   const [apiId, setApiId] = createSignal("");
   const [order, setOrder] = createSignal<Order>("random");
+  const [editingId, setEditingId] = createSignal<string | null>(null);
   const [formError, setFormError] = createSignal("");
   const [toastMsg, setToastMsg] = createSignal("");
 
@@ -146,28 +148,67 @@ export default function Manager(props: {
   };
   onCleanup(() => clearTimeout(toastTimer));
 
-  const add = () => {
+  const resetForm = () => {
+    setName("");
+    setUrl("");
+    setAuthorizationToken("");
+    setApiId("");
+    setOrder("random");
+    setEditingId(null);
+    setFormError("");
+  };
+
+  const save = () => {
     setFormError("");
     const n = name().trim();
     const u = url().trim();
-    const id = apiId().trim() || `api-${Date.now().toString(36)}`;
+    const currentEditingId = editingId();
+    const id =
+      apiId().trim() ||
+      currentEditingId ||
+      `api-${Date.now().toString(36)}`;
     if (!n || !u) {
       setFormError("API 名と URL を入力してください");
       return;
     }
-    if (props.sources.some((s) => s.id === id)) {
+    if (props.sources.some((s) => s.id === id && s.id !== currentEditingId)) {
       setFormError(`API_id "${id}" は既に使われています`);
       return;
     }
-    props.onUpdate([...props.sources, { id, name: n, url: u, order: order() }]);
-    setName("");
-    setUrl("");
-    setApiId("");
-    setOrder("random");
+    const token = authorizationToken().trim();
+    const nextSource: ApiSource = {
+      id,
+      name: n,
+      url: u,
+      authorizationToken: token,
+      order: order(),
+    };
+
+    if (currentEditingId) {
+      props.onUpdate(
+        props.sources.map((s) => (s.id === currentEditingId ? nextSource : s)),
+      );
+      showToast("API 情報を更新しました");
+    } else {
+      props.onUpdate([...props.sources, nextSource]);
+      showToast("API を追加しました");
+    }
+    resetForm();
+  };
+
+  const edit = (source: ApiSource) => {
+    setName(source.name);
+    setUrl(source.url);
+    setAuthorizationToken(source.authorizationToken ?? "");
+    setApiId(source.id);
+    setOrder(source.order);
+    setEditingId(source.id);
+    setFormError("");
   };
 
   const remove = (id: string) => {
     props.onUpdate(props.sources.filter((s) => s.id !== id));
+    if (editingId() === id) resetForm();
   };
 
   const changeOrder = (id: string, order: Order) => {
@@ -209,6 +250,7 @@ export default function Manager(props: {
                   <p class={sourceName}>{s.name}</p>
                   <p class={sourceUrl}>
                     id: {s.id}　/　{s.url}
+                    {s.authorizationToken ? "　/　Authorization 設定済み" : ""}
                   </p>
                   <div class={sourceMeta}>
                     <select
@@ -237,6 +279,9 @@ export default function Manager(props: {
                     >
                       リンクをコピー
                     </button>
+                    <button class={smallButton()} onClick={() => edit(s)}>
+                      編集
+                    </button>
                     <button
                       class={smallButton({ kind: "danger" })}
                       onClick={() => remove(s.id)}
@@ -252,7 +297,9 @@ export default function Manager(props: {
       </section>
 
       <section class={panel}>
-        <h2 class={panelTitle}>API を追加</h2>
+        <h2 class={panelTitle}>
+          {editingId() ? "API を編集" : "API を追加"}
+        </h2>
         <div class={formGrid}>
           <label class={field}>
             API 名
@@ -283,6 +330,17 @@ export default function Manager(props: {
             />
           </label>
           <label class={field}>
+            Bearer token(任意)
+            <input
+              class={input}
+              type="password"
+              value={authorizationToken()}
+              onInput={(e) => setAuthorizationToken(e.currentTarget.value)}
+              placeholder="xxxxx"
+              autocomplete="off"
+            />
+          </label>
+          <label class={field}>
             表示順
             <select
               class={ui.select}
@@ -298,9 +356,14 @@ export default function Manager(props: {
             <p class={errorText}>{formError()}</p>
           </Show>
           <div class={ui.buttonRow}>
-            <button class={ui.button({ kind: "primary" })} onClick={add}>
-              追加
+            <button class={ui.button({ kind: "primary" })} onClick={save}>
+              {editingId() ? "更新" : "追加"}
             </button>
+            <Show when={editingId()}>
+              <button class={ui.button()} onClick={resetForm}>
+                キャンセル
+              </button>
+            </Show>
           </div>
         </div>
       </section>

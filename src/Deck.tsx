@@ -53,6 +53,32 @@ const counter = css({
   letterSpacing: "0.05em",
 });
 
+const editAnswerButton = css({
+  position: "absolute",
+  top: "36px",
+  right: "18px",
+  width: "34px",
+  height: "34px",
+  borderRadius: "50%",
+  borderWidth: "1px",
+  borderStyle: "solid",
+  borderColor: "edge",
+  background: "white",
+  color: "ink",
+  fontSize: "17px",
+  lineHeight: "1",
+  cursor: "pointer",
+  display: "inline-flex",
+  alignItems: "center",
+  justifyContent: "center",
+  boxShadow: "0 1px 2px rgba(31,41,51,0.10)",
+  _hover: { background: "rgba(0,0,0,0.05)" },
+  _focusVisible: {
+    outline: "2px solid token(colors.shu)",
+    outlineOffset: "2px",
+  },
+});
+
 // 表面: 単語のみを中央に
 const front = css({
   flex: "1",
@@ -73,7 +99,7 @@ const front = css({
 const word = css({
   margin: "0",
   minWidth: "0",
-  paddingBottom: "14px",
+  padding: "0 46px 14px 0",
   fontSize: "21px",
   fontWeight: "bold",
   lineHeight: "1.4",
@@ -145,6 +171,28 @@ const answer = css({
   },
   "& img": { maxWidth: "100%" },
   "& del": { color: "sub" },
+});
+
+const answerEditor = css({
+  flex: "1",
+  minWidth: "0",
+  minHeight: "180px",
+  marginTop: "4",
+  padding: "12px 14px",
+  fontSize: "16px",
+  lineHeight: "1.7",
+  fontFamily: "inherit",
+  color: "ink",
+  borderWidth: "1px",
+  borderStyle: "solid",
+  borderColor: "edge",
+  borderRadius: "8px",
+  background: "white",
+  resize: "vertical",
+  _focusVisible: {
+    outline: "2px solid token(colors.shu)",
+    outlineOffset: "1px",
+  },
 });
 
 const centerNote = css({
@@ -310,6 +358,16 @@ function sortItems(data: Item[], order: Order): Item[] {
   return shuffle(a);
 }
 
+function authHeaders(src: ApiSource): HeadersInit | undefined {
+  const token = src.authorizationToken?.trim();
+  if (!token) return undefined;
+  return {
+    Authorization: token.toLowerCase().startsWith("bearer ")
+      ? token
+      : `Bearer ${token}`,
+  };
+}
+
 export default function Deck(props: {
   source: ApiSource;
   onChangeOrder: (order: Order) => void;
@@ -319,6 +377,7 @@ export default function Deck(props: {
   const [loadError, setLoadError] = createSignal("");
   const [idx, setIdx] = createSignal(0);
   const [revealed, setRevealed] = createSignal(false);
+  const [contentDraft, setContentDraft] = createSignal<string | null>(null);
   const [ok, setOk] = createSignal(false);
   const [okCount, setOkCount] = createSignal(0);
   const [toastMsg, setToastMsg] = createSignal("");
@@ -372,6 +431,7 @@ export default function Deck(props: {
     setLoadError("");
     setIdx(0);
     setRevealed(false);
+    setContentDraft(null);
     setOk(false);
     setOkCount(0);
     setCurrentId(null);
@@ -380,7 +440,7 @@ export default function Deck(props: {
     setSeenAt(new Map());
     setOkDelta(new Map());
     try {
-      const res = await fetch(src.url);
+      const res = await fetch(src.url, { headers: authHeaders(src) });
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const text = await res.text();
       // JSON / CSV を自動判定して Item 配列へ正規化する
@@ -423,8 +483,20 @@ export default function Deck(props: {
     onCleanup(() => clearInterval(timer));
   });
 
-  const reveal = () => setRevealed(true);
+  const reveal = () => {
+    setContentDraft(null);
+    setRevealed(true);
+  };
   const toggleOk = () => setOk((v) => !v);
+  const editAnswer = () => {
+    const it = item();
+    if (!it) return;
+    setContentDraft(it.contents);
+  };
+  const editedContents = (it: Item): string | undefined => {
+    const draft = contentDraft();
+    return draft !== null && draft !== it.contents ? draft : undefined;
+  };
 
   const skip = () => {
     const it = item();
@@ -432,7 +504,13 @@ export default function Deck(props: {
     // [Reveal] 後にのみ結果を POST する
     if (revealed()) {
       const isOk = ok();
+      const contents = editedContents(it);
       if (isOk) setOkCount((n) => n + 1);
+      if (contents !== undefined) {
+        setItems((list) =>
+          list?.map((x) => (x.id === it.id ? { ...x, contents } : x)) ?? null,
+        );
+      }
       // 暗記モードでは正答をセッション内にも反映し、出る頻度を下げる
       if (isOk && isMemorize()) {
         setOkDelta((m) => {
@@ -445,13 +523,17 @@ export default function Deck(props: {
         method: "POST",
         // application/json は CORS プリフライト(OPTIONS)を誘発し、GAS は
         // これを処理できず弾かれる。text/plain なら「単純リクエスト」となり
-        // プリフライトが発生しない。ボディは JSON 文字列のままで、GAS 側は
-        // e.postData.contents で受け取って JSON.parse できる。
-        headers: { "Content-Type": "text/plain;charset=utf-8" },
+        // Authorization なしではプリフライトが発生しない。ボディは JSON 文字列の
+        // ままで、GAS 側は e.postData.contents で受け取って JSON.parse できる。
+        headers: {
+          "Content-Type": "text/plain;charset=utf-8",
+          ...authHeaders(props.source),
+        },
         body: JSON.stringify({
           id: it.id,
           is_OK: isOk,
           date: new Date().toISOString(),
+          ...(contents !== undefined ? { contents } : {}),
         }),
       })
         .then((res) => {
@@ -461,6 +543,7 @@ export default function Deck(props: {
         .catch(() => showToast("結果の送信に失敗しました"));
     }
     setRevealed(false);
+    setContentDraft(null);
     setOk(false);
 
     if (isMemorize()) {
@@ -566,11 +649,32 @@ export default function Deck(props: {
                     when={revealed()}
                     fallback={<p class={front}>{item()!.title}</p>}
                   >
+                    <button
+                      class={editAnswerButton}
+                      type="button"
+                      aria-label="回答を編集"
+                      title="回答を編集"
+                      onClick={editAnswer}
+                    >
+                      ✎
+                    </button>
                     <h2 class={word}>{item()!.title}</h2>
-                    <div
-                      class={answer}
-                      innerHTML={renderMarkdown(item()!.contents)}
-                    />
+                    <Show
+                      when={contentDraft() !== null}
+                      fallback={
+                        <div
+                          class={answer}
+                          innerHTML={renderMarkdown(item()!.contents)}
+                        />
+                      }
+                    >
+                      <textarea
+                        class={answerEditor}
+                        value={contentDraft() ?? ""}
+                        onInput={(e) => setContentDraft(e.currentTarget.value)}
+                        aria-label="回答内容"
+                      />
+                    </Show>
                   </Show>
                 </Show>
               </Show>

@@ -6,6 +6,7 @@ export type ApiSource = {
   id: string; // [API_id] — URL パラメータ ?id= に対応
   name: string; // [API 名]
   url: string; // 取得先 API の URL(GET / POST 共通)
+  authorizationToken?: string; // Bearer token(任意)
   order: Order; // [order] 表示順
 };
 
@@ -30,6 +31,10 @@ export function loadSources(): ApiSource[] {
         id: s.id,
         name: typeof s.name === "string" ? s.name : s.id,
         url: s.url,
+        authorizationToken:
+          typeof s.authorizationToken === "string"
+            ? s.authorizationToken
+            : "",
         order: (
           ["random", "id_asc", "date_desc", "memorize"] as const
         ).includes(s.order)
