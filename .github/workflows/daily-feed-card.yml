@@ -36,7 +36,14 @@ jobs:
         run: npm run daily-feed
         env:
           MEMOAPP_API_TOKEN: ${{ secrets.MEMOAPP_API_TOKEN }}
-          INTERESTS: ${{ vars.INTERESTS }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          OPENAI_MODEL: ${{ vars.OPENAI_MODEL }}
+          INTEREST_CATEGORIES_JSON: ${{ vars.INTEREST_CATEGORIES_JSON }}
+          CATEGORY_MAX_ITEMS: ${{ vars.CATEGORY_MAX_ITEMS }}
+          DISCOVERY_MAX_ITEMS: ${{ vars.DISCOVERY_MAX_ITEMS }}
+          LOW_CONFIDENCE_MAX_ITEMS: ${{ vars.LOW_CONFIDENCE_MAX_ITEMS }}
+          SOURCE_COVERAGE_MAX_ITEMS: ${{ vars.SOURCE_COVERAGE_MAX_ITEMS }}
+          MIN_RELEVANCE: ${{ vars.MIN_RELEVANCE }}
           FEEDS_JSON: ${{ vars.FEEDS_JSON }}
           PARENT_CARD_ID: "88"
           TIME_ZONE: "Asia/Tokyo"

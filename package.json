@@ -9,7 +9,8 @@
     "daily-feed": "node dist/daily-feed-card.js"
   },
   "dependencies": {
-    "fast-xml-parser": "^5.10.1"
+    "fast-xml-parser": "^5.10.1",
+    "openai": "^6.48.0"
   },
   "devDependencies": {
     "@types/node": "^20.14.15",

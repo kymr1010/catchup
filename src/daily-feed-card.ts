@@ -1,3 +1,4 @@
+import OpenAI from "openai";
 import { XMLParser } from "fast-xml-parser";
 
 type FeedSource = {
@@ -11,8 +12,25 @@ type FeedItem = {
   url: string;
   summary: string;
   publishedAt?: string;
+  category: string;
   score: number;
-  matchedTerms: string[];
+  relevance: number;
+  confidence: number;
+  aiSummary: string;
+  reason: string;
+  discovery: boolean;
+};
+
+type FeedItemBase = Omit<FeedItem, "category" | "score" | "relevance" | "confidence" | "aiSummary" | "reason" | "discovery">;
+
+type InterestCategory = {
+  name: string;
+  terms: string[];
+};
+
+type CategorizedItems = {
+  category: InterestCategory;
+  items: FeedItem[];
 };
 
 type CardApiResponse = {
@@ -26,25 +44,25 @@ const DEFAULT_FEEDS: FeedSource[] = [
   { name: "Zenn", url: "https://zenn.dev/feed" }
 ];
 
-const API_BASE_URL = process.env.MEMOAPP_API_BASE_URL ?? "https://mnyume.com/api";
+const API_BASE_URL = process.env.MEMOAPP_API_BASE_URL?.trim() || "https://mnyume.com/api";
 const DRY_RUN = process.env.DRY_RUN === "true";
 const API_TOKEN = DRY_RUN ? "" : requiredEnv("MEMOAPP_API_TOKEN");
 const PARENT_CARD_ID = numberEnv("PARENT_CARD_ID", 88);
 const MAX_ITEMS = numberEnv("MAX_ITEMS", 30);
-const MIN_SCORE = numberEnv("MIN_SCORE", 1);
-const TIME_ZONE = process.env.TIME_ZONE ?? "Asia/Tokyo";
-const INTERESTS = csvEnv("INTERESTS", [
-  "typescript",
-  "javascript",
-  "node",
-  "react",
-  "ai",
-  "llm",
-  "openai",
-  "github actions",
-  "web development",
-  "software engineering"
-]);
+const MIN_RELEVANCE = numberEnv("MIN_RELEVANCE", 0.25);
+const CATEGORY_MAX_ITEMS = optionalNumberEnv("CATEGORY_MAX_ITEMS");
+const DISCOVERY_MAX_ITEMS = numberEnv("DISCOVERY_MAX_ITEMS", 5);
+const LOW_CONFIDENCE_MAX_ITEMS = numberEnv("LOW_CONFIDENCE_MAX_ITEMS", 3);
+const LOW_CONFIDENCE_THRESHOLD = numberEnv("LOW_CONFIDENCE_THRESHOLD", 0.55);
+const SOURCE_COVERAGE_MAX_ITEMS = numberEnv("SOURCE_COVERAGE_MAX_ITEMS", 3);
+const AI_MODEL = process.env.OPENAI_MODEL?.trim() || "gpt-5-nano";
+const AI_BATCH_SIZE = numberEnv("AI_BATCH_SIZE", 20);
+const TIME_ZONE = process.env.TIME_ZONE?.trim() || "Asia/Tokyo";
+const INTEREST_CATEGORIES = readInterestCategories();
+
+const openai = new OpenAI({
+  apiKey: requiredEnv("OPENAI_API_KEY")
+});
 
 const parser = new XMLParser({
   ignoreAttributes: false,
@@ -56,13 +74,13 @@ const parser = new XMLParser({
 async function main() {
   const feeds = readFeeds();
   const items = await fetchAllFeeds(feeds);
-  const rankedItems = rankItems(items, INTERESTS)
-    .filter((item) => item.score >= MIN_SCORE)
-    .slice(0, MAX_ITEMS);
+  const assessedItems = await assessItemsWithAi(items, INTEREST_CATEGORIES);
+  const categorizedItems = selectBalancedItems(assessedItems, INTEREST_CATEGORIES, MAX_ITEMS, CATEGORY_MAX_ITEMS);
+  const selectedCount = categorizedItems.reduce((total, category) => total + category.items.length, 0);
 
   const today = formatDate(new Date(), TIME_ZONE);
   const title = today;
-  const contents = renderMarkdown(today, rankedItems, feeds);
+  const contents = renderMarkdown(today, categorizedItems, feeds);
 
   if (DRY_RUN) {
     console.log(contents);
@@ -73,7 +91,7 @@ async function main() {
   const cardId = await createCard(title, contents);
   await connectCards(PARENT_CARD_ID, cardId);
 
-  console.log(`Created card ${cardId} under parent ${PARENT_CARD_ID} with ${rankedItems.length} articles.`);
+  console.log(`Created card ${cardId} under parent ${PARENT_CARD_ID} with ${selectedCount} articles.`);
 }
 
 function requiredEnv(name: string): string {
@@ -94,6 +112,16 @@ function numberEnv(name: string, defaultValue: number): number {
   return value;
 }
 
+function optionalNumberEnv(name: string): number | undefined {
+  const raw = process.env[name];
+  if (!raw) return undefined;
+  const value = Number(raw);
+  if (!Number.isFinite(value)) {
+    throw new Error(`${name} must be a number.`);
+  }
+  return value;
+}
+
 function csvEnv(name: string, defaultValue: string[]): string[] {
   const raw = process.env[name];
   if (!raw) return defaultValue;
@@ -101,6 +129,65 @@ function csvEnv(name: string, defaultValue: string[]): string[] {
     .split(",")
     .map((value) => value.trim())
     .filter(Boolean);
+}
+
+function readInterestCategories(): InterestCategory[] {
+  const raw = process.env.INTEREST_CATEGORIES_JSON;
+  if (raw) {
+    const parsed = JSON.parse(raw) as unknown;
+    return parseInterestCategories(parsed);
+  }
+
+  const legacyInterests = process.env.INTERESTS;
+  if (legacyInterests) {
+    return [{ name: "Interests", terms: csvEnv("INTERESTS", []) }];
+  }
+
+  return [
+    { name: "AI", terms: ["ai", "llm", "openai", "machine learning", "生成ai"] },
+    { name: "Frontend", terms: ["typescript", "javascript", "react", "css", "web development"] },
+    { name: "Backend", terms: ["node", "api", "database", "server", "backend"] },
+    { name: "Infrastructure", terms: ["github actions", "docker", "kubernetes", "cloud", "devops"] },
+    { name: "Engineering", terms: ["software engineering", "testing", "architecture", "security"] }
+  ];
+}
+
+function parseInterestCategories(parsed: unknown): InterestCategory[] {
+  if (Array.isArray(parsed)) {
+    return parsed.map((category, index) => {
+      if (!isRecord(category) || typeof category.name !== "string" || !Array.isArray(category.terms)) {
+        throw new Error(`INTEREST_CATEGORIES_JSON[${index}] must have string name and terms array.`);
+      }
+      return {
+        name: category.name,
+        terms: category.terms.map((term) => {
+          if (typeof term !== "string") {
+            throw new Error(`INTEREST_CATEGORIES_JSON[${index}].terms must contain only strings.`);
+          }
+          return term;
+        }).filter(Boolean)
+      };
+    }).filter((category) => category.terms.length > 0);
+  }
+
+  if (isRecord(parsed)) {
+    return Object.entries(parsed).map(([name, terms]) => {
+      if (!Array.isArray(terms)) {
+        throw new Error(`INTEREST_CATEGORIES_JSON.${name} must be an array of strings.`);
+      }
+      return {
+        name,
+        terms: terms.map((term) => {
+          if (typeof term !== "string") {
+            throw new Error(`INTEREST_CATEGORIES_JSON.${name} must contain only strings.`);
+          }
+          return term;
+        }).filter(Boolean)
+      };
+    }).filter((category) => category.terms.length > 0);
+  }
+
+  throw new Error("INTEREST_CATEGORIES_JSON must be an object or an array.");
 }
 
 function readFeeds(): FeedSource[] {
@@ -120,9 +207,9 @@ function readFeeds(): FeedSource[] {
   });
 }
 
-async function fetchAllFeeds(feeds: FeedSource[]): Promise<Omit<FeedItem, "score" | "matchedTerms">[]> {
+async function fetchAllFeeds(feeds: FeedSource[]): Promise<FeedItemBase[]> {
   const results = await Promise.allSettled(feeds.map(fetchFeed));
-  const items: Omit<FeedItem, "score" | "matchedTerms">[] = [];
+  const items: FeedItemBase[] = [];
   let successCount = 0;
 
   for (const result of results) {
@@ -141,7 +228,7 @@ async function fetchAllFeeds(feeds: FeedSource[]): Promise<Omit<FeedItem, "score
   return dedupeByUrl(items);
 }
 
-async function fetchFeed(feed: FeedSource): Promise<Omit<FeedItem, "score" | "matchedTerms">[]> {
+async function fetchFeed(feed: FeedSource): Promise<FeedItemBase[]> {
   const response = await fetch(feed.url, {
     headers: {
       "User-Agent": "ketchup-daily-feed-card/1.0"
@@ -157,7 +244,7 @@ async function fetchFeed(feed: FeedSource): Promise<Omit<FeedItem, "score" | "ma
   return normalizeFeed(parsed, feed.name);
 }
 
-function normalizeFeed(parsed: unknown, source: string): Omit<FeedItem, "score" | "matchedTerms">[] {
+function normalizeFeed(parsed: unknown, source: string): FeedItemBase[] {
   if (!isRecord(parsed)) return [];
 
   if (isRecord(parsed.rss) && isRecord(parsed.rss.channel)) {
@@ -172,7 +259,7 @@ function normalizeFeed(parsed: unknown, source: string): Omit<FeedItem, "score" 
   return [];
 }
 
-function normalizeRssItem(item: unknown, source: string): Partial<Omit<FeedItem, "score" | "matchedTerms">> {
+function normalizeRssItem(item: unknown, source: string): Partial<FeedItemBase> {
   if (!isRecord(item)) return {};
 
   return {
@@ -184,7 +271,7 @@ function normalizeRssItem(item: unknown, source: string): Partial<Omit<FeedItem,
   };
 }
 
-function normalizeAtomEntry(entry: unknown, source: string): Partial<Omit<FeedItem, "score" | "matchedTerms">> {
+function normalizeAtomEntry(entry: unknown, source: string): Partial<FeedItemBase> {
   if (!isRecord(entry)) return {};
 
   return {
@@ -196,62 +283,358 @@ function normalizeAtomEntry(entry: unknown, source: string): Partial<Omit<FeedIt
   };
 }
 
-function rankItems(items: Omit<FeedItem, "score" | "matchedTerms">[], interests: string[]): FeedItem[] {
-  return items
-    .map((item) => {
-      const text = `${item.title}\n${item.summary}`.toLowerCase();
-      const matchedTerms = interests.filter((term) => text.includes(term.toLowerCase()));
-      const score = matchedTerms.reduce((total, term) => {
-        const escaped = escapeRegExp(term.toLowerCase());
-        const titleMatches = countMatches(item.title.toLowerCase(), escaped);
-        const bodyMatches = countMatches(item.summary.toLowerCase(), escaped);
-        return total + titleMatches * 5 + bodyMatches;
-      }, 0);
+async function assessItemsWithAi(items: FeedItemBase[], categories: InterestCategory[]): Promise<FeedItem[]> {
+  const assessedItems: FeedItem[] = [];
 
-      return {
-        ...item,
-        score,
-        matchedTerms
-      };
-    })
-    .sort((a, b) => {
-      if (b.score !== a.score) return b.score - a.score;
-      return timestamp(b.publishedAt) - timestamp(a.publishedAt);
-    });
+  for (let start = 0; start < items.length; start += AI_BATCH_SIZE) {
+    const batch = items.slice(start, start + AI_BATCH_SIZE);
+    const assessments = await requestAiAssessments(batch, categories, start);
+    assessedItems.push(...mergeAssessments(batch, assessments));
+  }
+
+  return assessedItems.sort(compareFeedItems);
 }
 
-function renderMarkdown(today: string, items: FeedItem[], feeds: FeedSource[]): string {
+type AiAssessment = {
+  index: number;
+  category: string;
+  relevance: number;
+  confidence: number;
+  summary: string;
+  reason: string;
+  discovery: boolean;
+};
+
+async function requestAiAssessments(
+  items: FeedItemBase[],
+  categories: InterestCategory[],
+  offset: number
+): Promise<AiAssessment[]> {
+  const response = await openai.responses.create({
+    model: AI_MODEL,
+    instructions: [
+      "You classify RSS articles for a daily engineering reading list.",
+      "Assess every article. Do not omit any article.",
+      "Choose exactly one configured category name when it fits.",
+      "Use category \"Discovery\" for useful, novel, or broadly relevant engineering articles that do not fit configured categories.",
+      "Use low relevance for spam, job posts, comments-only pages, duplicate announcements, or articles that are not useful to the user's interests.",
+      "Write the summary in Japanese in one concise sentence.",
+      "Return only JSON matching the schema."
+    ].join(" "),
+    input: JSON.stringify({
+      categories: categories.map((category) => ({
+        name: category.name,
+        interests: category.terms
+      })),
+      articles: items.map((item, index) => ({
+        index,
+        title: item.title,
+        source: item.source,
+        url: item.url,
+        publishedAt: item.publishedAt ?? null,
+        summary: truncate(item.summary, 1200)
+      }))
+    }),
+    text: {
+      format: {
+        type: "json_schema",
+        name: "daily_feed_assessments",
+        strict: true,
+        schema: {
+          type: "object",
+          additionalProperties: false,
+          properties: {
+            assessments: {
+              type: "array",
+              items: {
+                type: "object",
+                additionalProperties: false,
+                properties: {
+                  index: { type: "integer", minimum: 0 },
+                  category: { type: "string" },
+                  relevance: { type: "number", minimum: 0, maximum: 1 },
+                  confidence: { type: "number", minimum: 0, maximum: 1 },
+                  summary: { type: "string" },
+                  reason: { type: "string" },
+                  discovery: { type: "boolean" }
+                },
+                required: ["index", "category", "relevance", "confidence", "summary", "reason", "discovery"]
+              }
+            }
+          },
+          required: ["assessments"]
+        }
+      }
+    }
+  });
+
+  const parsed = JSON.parse(response.output_text) as unknown;
+  if (!isRecord(parsed) || !Array.isArray(parsed.assessments)) {
+    throw new Error(`OpenAI response did not include assessments array for batch starting at ${offset}.`);
+  }
+
+  return parsed.assessments.map((assessment, index) => normalizeAssessment(assessment, index, categories));
+}
+
+function normalizeAssessment(assessment: unknown, fallbackIndex: number, categories: InterestCategory[]): AiAssessment {
+  if (!isRecord(assessment)) {
+    return fallbackAssessment(fallbackIndex);
+  }
+
+  const category = stringValue(assessment.category);
+  const knownCategory = categories.some((item) => item.name === category);
+  const discovery = booleanValue(assessment.discovery) || !knownCategory;
+
+  return {
+    index: integerValue(assessment.index, fallbackIndex),
+    category: discovery ? "Discovery" : category,
+    relevance: clampNumber(assessment.relevance, 0, 1),
+    confidence: clampNumber(assessment.confidence, 0, 1),
+    summary: truncate(stringValue(assessment.summary), 280),
+    reason: truncate(stringValue(assessment.reason), 180),
+    discovery
+  };
+}
+
+function fallbackAssessment(index: number): AiAssessment {
+  return {
+    index,
+    category: "Discovery",
+    relevance: 0.25,
+    confidence: 0,
+    summary: "AI判定の解析に失敗したため、確認候補として残しています。",
+    reason: "AI response parse fallback",
+    discovery: true
+  };
+}
+
+function mergeAssessments(items: FeedItemBase[], assessments: AiAssessment[]): FeedItem[] {
+  const byIndex = new Map(assessments.map((assessment) => [assessment.index, assessment]));
+
+  return items.map((item, index) => {
+    const assessment = byIndex.get(index) ?? fallbackAssessment(index);
+    return {
+      ...item,
+      category: assessment.category,
+      score: Math.round(assessment.relevance * 100),
+      relevance: assessment.relevance,
+      confidence: assessment.confidence,
+      aiSummary: assessment.summary || truncate(item.summary, 180),
+      reason: assessment.reason,
+      discovery: assessment.discovery
+    };
+  });
+}
+
+function selectBalancedItems(
+  items: FeedItem[],
+  categories: InterestCategory[],
+  maxItems: number,
+  categoryMaxItems: number | undefined
+): CategorizedItems[] {
+  const configuredCategoryNames = new Set(categories.map((category) => category.name));
+  const discoveryCategory = { name: "Discovery", terms: ["novel", "useful", "unexpected"] };
+  const lowConfidenceCategory = { name: "Low confidence", terms: ["needs review"] };
+  const sourceCoverageCategory = { name: "Source coverage", terms: ["feed coverage"] };
+  const limitPerCategory = categoryMaxItems ?? Math.ceil(
+    Math.max(maxItems - DISCOVERY_MAX_ITEMS - LOW_CONFIDENCE_MAX_ITEMS - SOURCE_COVERAGE_MAX_ITEMS, categories.length) /
+      Math.max(categories.length, 1)
+  );
+  const candidatesByCategory = categories.map((category) => ({
+    category,
+    candidates: items
+      .filter((item) => item.category === category.name && item.relevance >= MIN_RELEVANCE)
+      .sort(compareFeedItems)
+  }));
+  const selectedByCategory = new Map<string, FeedItem[]>();
+  const selectedUrls = new Set<string>();
+  let selectedCount = 0;
+  let cursor = 0;
+  const standardItemLimit = Math.max(maxItems - DISCOVERY_MAX_ITEMS - LOW_CONFIDENCE_MAX_ITEMS - SOURCE_COVERAGE_MAX_ITEMS, 0);
+
+  while (selectedCount < standardItemLimit) {
+    let addedInRound = false;
+
+    for (const bucket of candidatesByCategory) {
+      if (selectedCount >= standardItemLimit) break;
+
+      const selected = selectedByCategory.get(bucket.category.name) ?? [];
+      if (selected.length >= limitPerCategory) continue;
+
+      const next = nextUnusedCandidate(bucket.candidates, selectedUrls, cursor);
+      if (!next) continue;
+
+      selected.push(next);
+      selectedByCategory.set(bucket.category.name, selected);
+      selectedUrls.add(next.url);
+      selectedCount += 1;
+      addedInRound = true;
+    }
+
+    if (!addedInRound) break;
+    cursor += 1;
+  }
+
+  const discoveryItems = items
+    .filter((item) => {
+      const unknownCategory = !configuredCategoryNames.has(item.category);
+      return !selectedUrls.has(item.url) && (item.discovery || unknownCategory || item.category === "Discovery");
+    })
+    .filter((item) => item.relevance >= MIN_RELEVANCE)
+    .sort(compareFeedItems)
+    .slice(0, Math.min(DISCOVERY_MAX_ITEMS, maxItems - selectedCount));
+
+  for (const item of discoveryItems) {
+    selectedUrls.add(item.url);
+  }
+  selectedCount += discoveryItems.length;
+
+  const lowConfidenceItems = items
+    .filter((item) => !selectedUrls.has(item.url) && item.confidence < LOW_CONFIDENCE_THRESHOLD)
+    .filter((item) => item.relevance >= MIN_RELEVANCE)
+    .sort(compareFeedItems)
+    .slice(0, Math.min(LOW_CONFIDENCE_MAX_ITEMS, maxItems - selectedCount));
+
+  for (const item of lowConfidenceItems) {
+    selectedUrls.add(item.url);
+  }
+  selectedCount += lowConfidenceItems.length;
+
+  const sourceCoverageItems = selectSourceCoverageItems(items, selectedUrls, maxItems - selectedCount);
+  for (const item of sourceCoverageItems) {
+    selectedUrls.add(item.url);
+  }
+  selectedCount += sourceCoverageItems.length;
+
+  if (selectedCount < maxItems) {
+    fillRemainingSlots(items, categories, selectedByCategory, selectedUrls, maxItems - selectedCount);
+  }
+
+  const result = categories.map((category) => ({
+    category,
+    items: selectedByCategory.get(category.name) ?? []
+  }));
+
+  result.push({ category: discoveryCategory, items: discoveryItems });
+  result.push({ category: lowConfidenceCategory, items: lowConfidenceItems });
+  result.push({ category: sourceCoverageCategory, items: sourceCoverageItems });
+  return result;
+}
+
+function selectSourceCoverageItems(items: FeedItem[], selectedUrls: Set<string>, remainingSlots: number): FeedItem[] {
+  if (remainingSlots <= 0 || SOURCE_COVERAGE_MAX_ITEMS <= 0) return [];
+
+  const selectedSources = new Set(items.filter((item) => selectedUrls.has(item.url)).map((item) => item.source));
+  const allSources = [...new Set(items.map((item) => item.source))];
+  const uncoveredSources = allSources.filter((source) => !selectedSources.has(source));
+  const selected: FeedItem[] = [];
+
+  for (const source of uncoveredSources) {
+    if (selected.length >= SOURCE_COVERAGE_MAX_ITEMS || selected.length >= remainingSlots) break;
+    const bestItem = items
+      .filter((item) => item.source === source && !selectedUrls.has(item.url))
+      .filter((item) => item.relevance >= MIN_RELEVANCE)
+      .sort(compareFeedItems)[0];
+
+    if (bestItem) {
+      selected.push(bestItem);
+    }
+  }
+
+  return selected;
+}
+
+function fillRemainingSlots(
+  items: FeedItem[],
+  categories: InterestCategory[],
+  selectedByCategory: Map<string, FeedItem[]>,
+  selectedUrls: Set<string>,
+  remainingSlots: number
+): void {
+  const categoryNames = new Set(categories.map((category) => category.name));
+  const fallbackItems = items
+    .filter((item) => !selectedUrls.has(item.url) && categoryNames.has(item.category))
+    .filter((item) => item.relevance >= MIN_RELEVANCE)
+    .sort(compareFeedItems)
+    .slice(0, remainingSlots);
+
+  for (const item of fallbackItems) {
+    const selected = selectedByCategory.get(item.category) ?? [];
+    selected.push(item);
+    selectedByCategory.set(item.category, selected);
+    selectedUrls.add(item.url);
+  }
+}
+
+function nextUnusedCandidate(candidates: FeedItem[], selectedUrls: Set<string>, startIndex: number): FeedItem | undefined {
+  for (let index = startIndex; index < candidates.length; index += 1) {
+    const candidate = candidates[index];
+    if (candidate && !selectedUrls.has(candidate.url)) return candidate;
+  }
+  return undefined;
+}
+
+function compareFeedItems(a: FeedItem, b: FeedItem): number {
+  if (b.score !== a.score) return b.score - a.score;
+  return timestamp(b.publishedAt) - timestamp(a.publishedAt);
+}
+
+function renderMarkdown(today: string, categorizedItems: CategorizedItems[], feeds: FeedSource[]): string {
+  const selectedCount = categorizedItems.reduce((total, category) => total + category.items.length, 0);
   const lines = [
     `# ${today}`,
     "",
     `対象RSS: ${feeds.map((feed) => feed.name).join(", ")}`,
-    `興味キーワード: ${INTERESTS.join(", ")}`,
+    `カテゴリ: ${categorizedItems.map(({ category }) => category.name).join(", ")}`,
     "",
     "## 記事"
   ];
 
-  if (items.length === 0) {
+  if (selectedCount === 0) {
     lines.push("", "関連度がしきい値以上の記事はありませんでした。");
     return lines.join("\n");
   }
 
-  for (const [index, item] of items.entries()) {
+  for (const { category, items } of categorizedItems) {
     lines.push(
       "",
-      `### ${index + 1}. [${escapeMarkdown(item.title)}](${item.url})`,
-      "",
-      `- Source: ${item.source}`,
-      `- Score: ${item.score}`,
-      `- Matched: ${item.matchedTerms.join(", ") || "none"}`,
-      item.publishedAt ? `- Published: ${item.publishedAt}` : "- Published: unknown"
+      `<details${items.length > 0 ? " open" : ""}>`,
+      `<summary>${escapeHtml(category.name)} (${items.length})</summary>`,
+      ""
     );
 
-    if (item.summary) {
-      lines.push("", truncate(item.summary, 500));
+    if (items.length === 0) {
+      lines.push("該当記事はありません。", "", "</details>");
+      continue;
     }
+
+    for (const [index, item] of items.entries()) {
+      lines.push(...renderItemMarkdown(item, index));
+    }
+
+    lines.push("", "</details>");
   }
 
   return lines.join("\n");
+}
+
+function renderItemMarkdown(item: FeedItem, index: number): string[] {
+  const lines = [
+    `### ${index + 1}. [${escapeMarkdown(item.title)}](${item.url})`,
+    "",
+    `- Source: ${item.source}`,
+    `- Relevance: ${item.relevance.toFixed(2)}`,
+    `- Confidence: ${item.confidence.toFixed(2)}`,
+    `- Reason: ${item.reason || "none"}`,
+    item.publishedAt ? `- Published: ${item.publishedAt}` : "- Published: unknown"
+  ];
+
+  if (item.aiSummary) {
+    lines.push("", item.aiSummary);
+  }
+
+  lines.push("");
+  return lines;
 }
 
 async function createCard(title: string, contents: string): Promise<number> {
@@ -318,11 +701,11 @@ function atomLink(link: unknown): string {
   return "";
 }
 
-function isFeedItemBase(item: Partial<Omit<FeedItem, "score" | "matchedTerms">>): item is Omit<FeedItem, "score" | "matchedTerms"> {
+function isFeedItemBase(item: Partial<FeedItemBase>): item is FeedItemBase {
   return Boolean(item.title && item.url);
 }
 
-function dedupeByUrl(items: Omit<FeedItem, "score" | "matchedTerms">[]): Omit<FeedItem, "score" | "matchedTerms">[] {
+function dedupeByUrl(items: FeedItemBase[]): FeedItemBase[] {
   const seen = new Set<string>();
   return items.filter((item) => {
     if (seen.has(item.url)) return false;
@@ -340,8 +723,30 @@ function arrayOf(value: unknown): unknown[] {
 function stringValue(value: unknown): string {
   if (typeof value === "string") return value.trim();
   if (typeof value === "number") return String(value);
+  if (typeof value === "boolean") return String(value);
   if (isRecord(value) && typeof value["#text"] === "string") return value["#text"].trim();
   return "";
+}
+
+function booleanValue(value: unknown): boolean {
+  if (typeof value === "boolean") return value;
+  if (typeof value === "string") return value.toLowerCase() === "true";
+  return false;
+}
+
+function integerValue(value: unknown, defaultValue: number): number {
+  if (typeof value === "number" && Number.isInteger(value)) return value;
+  if (typeof value === "string") {
+    const parsed = Number(value);
+    if (Number.isInteger(parsed)) return parsed;
+  }
+  return defaultValue;
+}
+
+function clampNumber(value: unknown, min: number, max: number): number {
+  const numberValue = typeof value === "number" ? value : Number(value);
+  if (!Number.isFinite(numberValue)) return min;
+  return Math.min(Math.max(numberValue, min), max);
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -368,6 +773,14 @@ function truncate(value: string, maxLength: number): string {
 
 function escapeMarkdown(value: string): string {
   return value.replace(/([\[\]])/g, "\\$1");
+}
+
+function escapeHtml(value: string): string {
+  return value
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;");
 }
 
 function escapeRegExp(value: string): string {
