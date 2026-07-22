@@ -15,7 +15,9 @@ Repository variables は任意です。
 - `INTERESTS`: 興味キーワード。カンマ区切り。例: `typescript,react,llm,github actions`
 - `FEEDS_JSON`: 追加・変更するRSS/Atomフィード。例: `[{"name":"Hacker News","url":"https://news.ycombinator.com/rss"},{"name":"Zenn","url":"https://zenn.dev/feed"}]`
 
-workflow は `.github/workflows/daily-feed-card.yml` で毎日 `07:00 JST` に動きます。手動実行もできます。
+workflow は `.github/workflows/daily-feed-card.yml` で毎日 `04:00 JST` に動きます。手動実行もできます。
+
+手動実行時は `dry_run` オプションを `true` にすると、RSS取得と本文生成だけを行い、カード作成と親子接続はスキップします。
 
 ## ローカル実行
 
