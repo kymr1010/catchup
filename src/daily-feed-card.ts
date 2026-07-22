@@ -40,8 +40,18 @@ type CardApiResponse = {
 };
 
 const DEFAULT_FEEDS: FeedSource[] = [
-  { name: "Hacker News", url: "https://news.ycombinator.com/rss" },
-  { name: "Zenn", url: "https://zenn.dev/feed" }
+  { name: "Hacker News", url: "https://hnrss.org/frontpage?count=30" },
+  { name: "Zenn", url: "https://zenn.dev/feed" },
+  { name: "TechCrunch", url: "https://techcrunch.com/feed/" },
+  { name: "The Verge", url: "https://www.theverge.com/rss/index.xml" },
+  { name: "Ars Technica", url: "https://feeds.arstechnica.com/arstechnica/index" },
+  { name: "Stack Overflow Blog", url: "https://stackoverflow.blog/feed/" },
+  { name: "GitHub Blog", url: "https://github.blog/feed/" },
+  { name: "OpenAI News", url: "https://openai.com/news/rss.xml" },
+  { name: "Google AI", url: "https://blog.google/technology/ai/rss/" },
+  { name: "AWS News Blog", url: "https://aws.amazon.com/blogs/aws/feed/" },
+  { name: "Hugging Face Blog", url: "https://huggingface.co/blog/feed.xml" },
+  { name: "Lobsters", url: "https://lobste.rs/rss" }
 ];
 
 const API_BASE_URL = process.env.MEMOAPP_API_BASE_URL?.trim() || "https://mnyume.com/api";
@@ -49,12 +59,13 @@ const DRY_RUN = process.env.DRY_RUN === "true";
 const API_TOKEN = DRY_RUN ? "" : requiredEnv("MEMOAPP_API_TOKEN");
 const PARENT_CARD_ID = numberEnv("PARENT_CARD_ID", 88);
 const MAX_ITEMS = numberEnv("MAX_ITEMS", 30);
+const FEED_MAX_ITEMS = numberEnv("FEED_MAX_ITEMS", 20);
 const MIN_RELEVANCE = numberEnv("MIN_RELEVANCE", 0.25);
 const CATEGORY_MAX_ITEMS = optionalNumberEnv("CATEGORY_MAX_ITEMS");
 const DISCOVERY_MAX_ITEMS = numberEnv("DISCOVERY_MAX_ITEMS", 5);
-const LOW_CONFIDENCE_MAX_ITEMS = numberEnv("LOW_CONFIDENCE_MAX_ITEMS", 3);
+const LOW_CONFIDENCE_MAX_ITEMS = numberEnv("LOW_CONFIDENCE_MAX_ITEMS", 0);
 const LOW_CONFIDENCE_THRESHOLD = numberEnv("LOW_CONFIDENCE_THRESHOLD", 0.55);
-const SOURCE_COVERAGE_MAX_ITEMS = numberEnv("SOURCE_COVERAGE_MAX_ITEMS", 3);
+const SOURCE_COVERAGE_MAX_ITEMS = numberEnv("SOURCE_COVERAGE_MAX_ITEMS", 0);
 const AI_MODEL = process.env.OPENAI_MODEL?.trim() || "gpt-5-nano";
 const AI_BATCH_SIZE = numberEnv("AI_BATCH_SIZE", 20);
 const TIME_ZONE = process.env.TIME_ZONE?.trim() || "Asia/Tokyo";
@@ -241,7 +252,7 @@ async function fetchFeed(feed: FeedSource): Promise<FeedItemBase[]> {
 
   const xml = await response.text();
   const parsed = parser.parse(xml) as unknown;
-  return normalizeFeed(parsed, feed.name);
+  return normalizeFeed(parsed, feed.name).slice(0, FEED_MAX_ITEMS);
 }
 
 function normalizeFeed(parsed: unknown, source: string): FeedItemBase[] {
@@ -318,7 +329,7 @@ async function requestAiAssessments(
       "Choose exactly one configured category name when it fits.",
       "Use category \"Discovery\" for useful, novel, or broadly relevant engineering articles that do not fit configured categories.",
       "Use low relevance for spam, job posts, comments-only pages, duplicate announcements, or articles that are not useful to the user's interests.",
-      "Write the summary in Japanese in one concise sentence.",
+      "Write the summary in Japanese in 2-3 sentences. Cover what happened, why it matters, and the likely engineering or product impact. Do not mention source, relevance, confidence, or scoring metadata.",
       "Return only JSON matching the schema."
     ].join(" "),
     input: JSON.stringify({
@@ -332,7 +343,7 @@ async function requestAiAssessments(
         source: item.source,
         url: item.url,
         publishedAt: item.publishedAt ?? null,
-        summary: truncate(item.summary, 1200)
+        summary: truncate(item.summary, 2200)
       }))
     }),
     text: {
@@ -390,7 +401,7 @@ function normalizeAssessment(assessment: unknown, fallbackIndex: number, categor
     category: discovery ? "Discovery" : category,
     relevance: clampNumber(assessment.relevance, 0, 1),
     confidence: clampNumber(assessment.confidence, 0, 1),
-    summary: truncate(stringValue(assessment.summary), 280),
+    summary: truncate(stringValue(assessment.summary), 700),
     reason: truncate(stringValue(assessment.reason), 180),
     discovery
   };
@@ -434,8 +445,6 @@ function selectBalancedItems(
 ): CategorizedItems[] {
   const configuredCategoryNames = new Set(categories.map((category) => category.name));
   const discoveryCategory = { name: "Discovery", terms: ["novel", "useful", "unexpected"] };
-  const lowConfidenceCategory = { name: "Low confidence", terms: ["needs review"] };
-  const sourceCoverageCategory = { name: "Source coverage", terms: ["feed coverage"] };
   const limitPerCategory = categoryMaxItems ?? Math.ceil(
     Math.max(maxItems - DISCOVERY_MAX_ITEMS - LOW_CONFIDENCE_MAX_ITEMS - SOURCE_COVERAGE_MAX_ITEMS, categories.length) /
       Math.max(categories.length, 1)
@@ -506,6 +515,9 @@ function selectBalancedItems(
   }
   selectedCount += sourceCoverageItems.length;
 
+  addSupplementalItemsToBuckets(lowConfidenceItems, configuredCategoryNames, selectedByCategory, discoveryItems);
+  addSupplementalItemsToBuckets(sourceCoverageItems, configuredCategoryNames, selectedByCategory, discoveryItems);
+
   if (selectedCount < maxItems) {
     fillRemainingSlots(items, categories, selectedByCategory, selectedUrls, maxItems - selectedCount);
   }
@@ -516,9 +528,24 @@ function selectBalancedItems(
   }));
 
   result.push({ category: discoveryCategory, items: discoveryItems });
-  result.push({ category: lowConfidenceCategory, items: lowConfidenceItems });
-  result.push({ category: sourceCoverageCategory, items: sourceCoverageItems });
   return result;
+}
+
+function addSupplementalItemsToBuckets(
+  items: FeedItem[],
+  configuredCategoryNames: Set<string>,
+  selectedByCategory: Map<string, FeedItem[]>,
+  discoveryItems: FeedItem[]
+): void {
+  for (const item of items) {
+    if (configuredCategoryNames.has(item.category)) {
+      const selected = selectedByCategory.get(item.category) ?? [];
+      selected.push(item);
+      selectedByCategory.set(item.category, selected);
+    } else {
+      discoveryItems.push(item);
+    }
+  }
 }
 
 function selectSourceCoverageItems(items: FeedItem[], selectedUrls: Set<string>, remainingSlots: number): FeedItem[] {
@@ -579,13 +606,10 @@ function compareFeedItems(a: FeedItem, b: FeedItem): number {
   return timestamp(b.publishedAt) - timestamp(a.publishedAt);
 }
 
-function renderMarkdown(today: string, categorizedItems: CategorizedItems[], feeds: FeedSource[]): string {
+function renderMarkdown(today: string, categorizedItems: CategorizedItems[], _feeds: FeedSource[]): string {
   const selectedCount = categorizedItems.reduce((total, category) => total + category.items.length, 0);
   const lines = [
     `# ${today}`,
-    "",
-    `対象RSS: ${feeds.map((feed) => feed.name).join(", ")}`,
-    `カテゴリ: ${categorizedItems.map(({ category }) => category.name).join(", ")}`,
     "",
     "## 記事"
   ];
@@ -622,11 +646,7 @@ function renderItemMarkdown(item: FeedItem, index: number): string[] {
   const lines = [
     `### ${index + 1}. [${escapeMarkdown(item.title)}](${item.url})`,
     "",
-    `- Source: ${item.source}`,
-    `- Relevance: ${item.relevance.toFixed(2)}`,
-    `- Confidence: ${item.confidence.toFixed(2)}`,
-    `- Reason: ${item.reason || "none"}`,
-    item.publishedAt ? `- Published: ${item.publishedAt}` : "- Published: unknown"
+    item.publishedAt ? `公開日: ${item.publishedAt}` : "公開日: 不明"
   ];
 
   if (item.aiSummary) {
